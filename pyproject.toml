@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "semi-supervised-image-clf"
+version = "0.1.0"
+description = "Label-Efficient Image Classification: From Self-Supervised Pretraining to Semi-Supervised Fine-Tuning"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "torch>=2.2",
+    "torchvision>=0.17",
+    "numpy>=1.26",
+    "scikit-learn>=1.4",
+    "matplotlib>=3.8",
+    "onnx>=1.16",
+    "onnxruntime>=1.17",
+    "onnxscript>=0.1",
+    "mlflow>=2.12",
+    "pydantic>=2.6",
+    "loguru>=0.7",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ty>=0.0.1a6",
+    "ruff>=0.4",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/semi_supervised_image_clf"]
+
+# ---------------------------------------------------------------------------
+# uv: use CPU-only PyTorch wheels to keep the venv small (~1.5 GB vs ~5 GB).
+# Kaggle notebooks install via pip and already have CUDA torch pre-installed,
+# so they are unaffected by this override.
+# ---------------------------------------------------------------------------
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+torchvision = [{ index = "pytorch-cpu" }]
+
+[tool.ruff]
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short --cov=semi_supervised_image_clf --cov-report=term-missing"

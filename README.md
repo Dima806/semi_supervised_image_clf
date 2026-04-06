@@ -2,9 +2,28 @@
 
 **Label-Efficient Image Classification: From Self-Supervised Pretraining to Semi-Supervised Fine-Tuning**
 
-Implements and compares three approaches on STL-10 to show how much SSL pretraining reduces the label requirement:
+Implements and compares three approaches on STL-10 to show how much SSL pretraining reduces the label requirement.
+
+### Measured results (Kaggle T4, April 2026)
+
+SimCLR ran 20 epochs; FixMatch sweep run separately (SimCLR + FixMatch end-to-end pending).
 
 | Method | Labels / class | Accuracy |
+|---|---|---|
+| Supervised baseline | 500 | **55.9%** |
+| FixMatch (random init) | 100 | **41.6%** |
+| FixMatch (random init) | 500 | **61.8%** |
+| FixMatch (random init) | 4 / 10 / 25 | ~10% ⚠ |
+| SimCLR linear probe | — (20 epochs) | **55.5%** |
+| SimCLR + FixMatch | — | *pending* |
+
+> ⚠ FixMatch at ≤25 labels/class scores near-random: the 0.95 pseudo-label confidence
+> threshold is never met with a random encoder + few labels. The SimCLR encoder init
+> is expected to resolve this.
+
+### Projected (100-epoch SimCLR + combined sweep)
+
+| Method | Labels / class | Projected accuracy |
 |---|---|---|
 | Supervised baseline | 500 | ~72% |
 | FixMatch (random init) | 100 | ~68% |
@@ -13,7 +32,7 @@ Implements and compares three approaches on STL-10 to show how much SSL pretrain
 | **SimCLR + FixMatch** | **25** | **~70%** |
 | **SimCLR + FixMatch** | **4** | **~60%** |
 
-SimCLR + FixMatch with **25 labels/class** (~70%) matches a fully supervised model trained on **500 labels/class** (~72%) — a **20× label reduction**.
+SimCLR + FixMatch with **25 labels/class** (~70%) is projected to match a fully supervised model at **500 labels/class** (~72%) — a **20× label reduction**.
 
 ---
 
@@ -65,8 +84,10 @@ make export
 ```
 
 Or run the Kaggle notebooks directly:
-- [`kaggle/simclr_pretrain.ipynb`](kaggle/simclr_pretrain.ipynb) — SimCLR pretraining
-- [`kaggle/fixmatch_sweep.ipynb`](kaggle/fixmatch_sweep.ipynb) — FixMatch label sweep + plots
+- [`kaggle/simclr_pretrain.ipynb`](kaggle/simclr_pretrain.ipynb) — SimCLR pretraining (template)
+- [`kaggle/fixmatch_sweep.ipynb`](kaggle/fixmatch_sweep.ipynb) — FixMatch label sweep + plots (template)
+- [`kaggle/simclr-pretrain.ipynb`](kaggle/simclr-pretrain.ipynb) — trained version with outputs
+- [`kaggle/fixmatch-sweep.ipynb`](kaggle/fixmatch-sweep.ipynb) — trained version with outputs
 
 Both notebooks have a `SMOKE_TEST = False` flag at the top for low-disk / quick runs.
 

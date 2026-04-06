@@ -12,7 +12,9 @@ This project implements and compares three image classification approaches on ST
 - **FixMatch**: supervised loss on labelled data + consistency regularisation on unlabelled data
 - **SimCLR + FixMatch**: SimCLR pretraining on the full unlabelled set, then FixMatch fine-tuning with a fraction of labels
 
-**Key result**: SimCLR + FixMatch with 25 labels/class (~70% accuracy) approaches supervised training with 500 labels/class (~72%) — a 20× label reduction.
+**Measured results (Kaggle T4, April 2026)**: FixMatch with 100 labels/class achieves 41.6% and with 500 labels/class 61.8%; supervised baseline 55.9%. SimCLR + FixMatch end-to-end is not yet measured (SimCLR ran 20 epochs, linear probe 55.5%; combined sweep pending).
+
+**Projected**: SimCLR + FixMatch with 25 labels/class (~70%) should approach supervised training with 500 labels/class — a 20× label reduction — once run end-to-end.
 
 ---
 
@@ -24,8 +26,10 @@ semi_supervised_image_clf/
 ├── .devcontainer/devcontainer.json      # 2-core Codespaces (dev + smoke tests)
 ├── .claude/commands/                    # Custom Claude Code slash commands
 ├── kaggle/
-│   ├── simclr_pretrain.ipynb            # Kaggle GPU: SimCLR pretraining
-│   ├── fixmatch_sweep.ipynb             # Kaggle GPU: FixMatch label sweep
+│   ├── simclr_pretrain.ipynb            # Kaggle GPU: SimCLR pretraining (template)
+│   ├── fixmatch_sweep.ipynb             # Kaggle GPU: FixMatch label sweep (template)
+│   ├── simclr-pretrain.ipynb            # trained version with outputs (T4, 20 epochs)
+│   ├── fixmatch-sweep.ipynb             # trained version with outputs (T4, 200 epochs)
 │   └── kaggle.json.example
 ├── config/
 │   ├── simclr.yaml
@@ -118,11 +122,12 @@ make kaggle_push      # push notebooks to Kaggle for GPU training
 | Environment | Use |
 |---|---|
 | **GitHub Codespaces** (2-core CPU) | Development, `make test`, `make lint`, `make smoke` |
-| **Kaggle** (T4/P100 GPU) | Full training — SimCLR 100 epochs + FixMatch 5-fraction sweep |
+| **Kaggle** (T4 GPU) | Full training — SimCLR pretraining + FixMatch 5-fraction sweep |
 
 - On Codespaces, `make smoke-data && make smoke` is the safe workflow (no 2.5 GB download).
 - `uv sync` installs CPU-only PyTorch wheels (~1.5 GB venv vs ~5 GB with CUDA). Kaggle notebooks use pip and already have CUDA torch pre-installed, so they are unaffected.
 - Kaggle notebooks have a `SMOKE_TEST = False` flag at the top — set to `True` for low-disk runs.
+- **Kaggle GPU note**: P100 (sm_60) is not supported by PyTorch ≥2.4. Prefer T4 (sm_75). The notebooks include an auto-reinstall cell for P100 sessions, but T4 is strongly recommended.
 
 ---
 
@@ -332,18 +337,41 @@ ruff = ">=0.4"
 
 ---
 
-## Expected Results
+## Results
 
-| Method | Labels / class | Expected accuracy |
+### Measured (Kaggle T4, April 2026)
+
+SimCLR pretrained for 20 epochs; FixMatch/supervised run separately (SimCLR ckpt not available during sweep).
+
+| Method | Labels / class | Total labels | Test accuracy |
+|---|---|---|---|
+| Supervised baseline | 500 | 5,000 | **55.9%** |
+| FixMatch (random init) | 4 | 40 | 10.3% |
+| FixMatch (random init) | 10 | 100 | 10.0% |
+| FixMatch (random init) | 25 | 250 | 10.0% |
+| FixMatch (random init) | 100 | 1,000 | **41.6%** |
+| FixMatch (random init) | 500 | 5,000 | **61.8%** |
+| SimCLR linear probe | — (20 epochs) | — | **55.5%** |
+| SimCLR + FixMatch | — | — | *not yet run end-to-end* |
+
+> **Why FixMatch scores ~10% at ≤25 labels/class**: with a randomly-initialised encoder
+> and so few labelled examples, the pseudo-label confidence threshold (0.95) is never
+> exceeded — the unsupervised loss contributes nothing. Performance recovers at 100
+> labels/class (41.6%) where pseudo-labels begin activating. Using the SimCLR encoder
+> as initialisation is expected to resolve this at low label counts.
+
+### Projected (100-epoch SimCLR + full sweep)
+
+| Method | Labels / class | Projected accuracy |
 |---|---|---|
-| Supervised baseline | 500 (full) | ~72% |
+| Supervised baseline | 500 | ~72% |
 | FixMatch (random init) | 100 | ~68% |
 | FixMatch (random init) | 25 | ~58% |
 | SimCLR + FixMatch | 100 | ~75% |
 | SimCLR + FixMatch | 25 | ~70% |
 | SimCLR + FixMatch | 4 | ~60% |
 
-Full training on Kaggle T4: supervised baseline ~20 min; SimCLR + FixMatch sweep ~90 min.
+Full training on Kaggle T4: SimCLR 100 epochs ~70 min; FixMatch sweep ~90 min.
 
 ---
 
@@ -352,7 +380,7 @@ Full training on Kaggle T4: supervised baseline ~20 min; SimCLR + FixMatch sweep
 | Risk | Mitigation |
 |---|---|
 | SimCLR too slow on 2 CPUs | Use `make smoke` (2 epochs, 1k images) |
-| FixMatch unstable with 4 labels/class | EMA model for pseudo-labels; supervised warmup |
+| FixMatch unstable with 4 labels/class | EMA model for pseudo-labels; supervised warmup. **Measured**: random-init FixMatch scores ~10% at ≤25 labels/class because pseudo-label threshold (0.95) is never met — use SimCLR encoder to fix |
 | STL-10 download fills Codespaces disk | Streaming download (tar.gz never on disk); `make smoke-data` writes ~120 MB; `make smoke` uses synthetic data for missing splits — no unlabeled download needed |
 | Kaggle session timeout (9h) | Two separate notebooks; checkpoints saved to Kaggle output |
 | Reproducibility across seeds | Fix seed in config; report mean over 3 seeds |

@@ -148,12 +148,12 @@ export:
 .PHONY: test lint
 
 test:
-	pytest tests/ -v
+	uv run pytest tests/ -v
 
 lint:
-	ruff format src/ tests/
-	ruff check --fix src/ tests/
-	ty check src/ --python $(shell which python)
+	uv run ruff format src/ tests/
+	uv run ruff check --fix src/ tests/
+	uv run ty check src/ --python $(shell uv run which python)
 
 # ============================================================================
 # Cleanup

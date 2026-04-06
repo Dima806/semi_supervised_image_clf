@@ -11,8 +11,10 @@ from collections.abc import Sized
 from pathlib import Path
 from typing import Any, cast
 
+import numpy as np
 import torch
 from loguru import logger
+from PIL import Image
 from torch.utils.data import DataLoader, Dataset, Subset
 from torchvision import datasets, transforms
 
@@ -48,6 +50,100 @@ def base_transform(input_size: int = 64) -> transforms.Compose:
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ]
     )
+
+
+# ---------------------------------------------------------------------------
+# Minimal STL-10 binary reader
+# ---------------------------------------------------------------------------
+
+# torchvision's STL10._check_integrity requires ALL five binary files to be
+# present (train_X, train_y, unlabeled_X, test_X, test_y) even when only one
+# split is requested.  Our tiered download intentionally omits unused splits,
+# so the integrity check always fails unless everything is present.
+# _STL10Split reads only the files it needs, skipping the global check.
+
+_STL10_SPLIT_FILES: dict[str, tuple[str, str | None]] = {
+    "train": ("train_X.bin", "train_y.bin"),
+    "test": ("test_X.bin", "test_y.bin"),
+    "unlabeled": ("unlabeled_X.bin", None),
+}
+_STL10_IMG_SHAPE = (96, 96, 3)  # HWC after transpose
+
+
+class _STL10Split(Dataset[tuple[Any, int]]):
+    """Read one STL-10 binary split without a global integrity check."""
+
+    def __init__(
+        self,
+        root: str,
+        split: str,
+        transform: transforms.Compose | None = None,
+    ) -> None:
+        base = Path(root) / _STL10_BASE
+        data_file, label_file = _STL10_SPLIT_FILES[split]
+
+        raw = np.fromfile(base / data_file, dtype=np.uint8)
+        images_chw = raw.reshape(-1, 3, 96, 96)
+        self._images: np.ndarray = np.transpose(images_chw, (0, 2, 3, 1))  # NHWC
+
+        if label_file is not None:
+            self._labels: np.ndarray = (
+                np.fromfile(base / label_file, dtype=np.uint8).astype(np.int64) - 1
+            )
+        else:
+            self._labels = np.full(len(self._images), -1, dtype=np.int64)
+
+        self.transform = transform
+
+    def __len__(self) -> int:
+        return len(self._images)
+
+    def __getitem__(self, index: Any) -> tuple[Any, int]:
+        img = Image.fromarray(self._images[int(index)])
+        label = int(self._labels[int(index)])
+        if self.transform is not None:
+            return self.transform(img), label
+        return img, label
+
+
+# ---------------------------------------------------------------------------
+# Synthetic dataset for smoke tests (no real data required)
+# ---------------------------------------------------------------------------
+
+
+class _SyntheticDataset(Dataset[tuple[Any, int]]):
+    """Random-pixel PIL-image dataset for smoke tests.
+
+    Returns ``(PIL.Image, label)`` by default — compatible with torchvision
+    augmentation pipelines that expect raw images.  Pass ``transform`` to get
+    normalised tensors instead (used for the test/eval path).
+    """
+
+    def __init__(
+        self,
+        n_samples: int = 200,
+        input_size: int = 64,
+        num_classes: int = 10,
+        transform: transforms.Compose | None = None,
+    ) -> None:
+        self.n_samples = n_samples
+        self.input_size = input_size
+        self.num_classes = num_classes
+        self.transform = transform
+        rng = np.random.default_rng(0)
+        self._imgs: np.ndarray = rng.integers(
+            0, 255, (n_samples, input_size, input_size, 3), dtype=np.uint8
+        )
+
+    def __len__(self) -> int:
+        return self.n_samples
+
+    def __getitem__(self, index: Any) -> tuple[Any, int]:
+        img = Image.fromarray(self._imgs[int(index) % self.n_samples])
+        label = int(index) % self.num_classes
+        if self.transform is not None:
+            return self.transform(img), label
+        return img, label
 
 
 # ---------------------------------------------------------------------------
@@ -103,64 +199,97 @@ def get_stl10_splits(
 ) -> tuple[DataLoader, DataLoader, DataLoader]:
     """Return (labelled_loader, unlabelled_loader, test_loader) for STL-10.
 
+    Design rule
+    -----------
+    * Labelled and test loaders serve **normalised tensors** (``base_transform``
+      applied) — they go directly into the training/eval loss.
+    * The unlabelled loader serves **raw PIL images** (no transform) — it is
+      always wrapped by ``FixMatchUnlabelledDataset`` which applies its own
+      augmentation pipeline (``WeakAugmentation`` / ``StrongAugmentation``),
+      both of which include ``ToTensor``.  Applying ``base_transform`` here
+      would cause a double-transform error.
+
     Args:
         config: data config containing ``data_dir`` and ``num_workers``.
         labels_per_class: number of labelled images per class (4/10/25/100/500).
         seed: random seed for reproducible label sampling.
         input_size: spatial resolution to resize images to.
-        smoke_test: if True, cap dataset sizes for fast iteration.
+        smoke_test: if True, use synthetic data for missing splits and cap sizes.
         max_labelled: smoke-test cap on labelled images.
         max_unlabelled: smoke-test cap on unlabelled images.
     """
     data_dir = config.data_dir
     num_workers = config.num_workers
     transform = base_transform(input_size)
-
-    # STL-10 has two labelled splits: 'train' (5000) and 'test' (8000)
-    # The 'unlabeled' split contains 100k images with label=-1
-    labelled_full = datasets.STL10(
-        root=data_dir, split="train", transform=transform, download=False
-    )
-    unlabelled_full = datasets.STL10(
-        root=data_dir, split="unlabeled", transform=transform, download=False
-    )
-    test_dataset = datasets.STL10(root=data_dir, split="test", transform=transform, download=False)
-
     num_classes = 10
 
-    # Sample label fraction
-    labelled_subset, extra_unlabelled = sample_label_fraction(
-        labelled_full, labels_per_class, num_classes, seed
-    )
+    # ------------------------------------------------------------------
+    # Train split — loaded twice:
+    #   • with base_transform  → for the labelled loader (tensors)
+    #   • without transform    → for extra_unlabelled fed into FixMatch
+    # Both use the same seed so sample_label_fraction picks identical indices.
+    # ------------------------------------------------------------------
+    train_transformed = _STL10Split(root=data_dir, split="train", transform=transform)
+    train_raw = _STL10Split(root=data_dir, split="train", transform=None)
 
-    # Combine original unlabelled + leftovers from labelled split
-    unlabelled_dataset: Dataset = torch.utils.data.ConcatDataset(  # type: ignore[type-arg]
-        [unlabelled_full, extra_unlabelled]
+    labelled_subset_transformed, _ = sample_label_fraction(
+        train_transformed, labels_per_class, num_classes, seed
+    )
+    _, extra_unlabelled_raw = sample_label_fraction(train_raw, labels_per_class, num_classes, seed)
+
+    # ------------------------------------------------------------------
+    # Unlabelled split (PIL images — no transform)
+    # ------------------------------------------------------------------
+    unlabelled_full: Dataset[Any]
+    if smoke_test and not _files_present(data_dir, ["unlabeled"]):
+        unlabelled_full = _SyntheticDataset(n_samples=max_unlabelled, input_size=input_size)
+    else:
+        unlabelled_full = _STL10Split(root=data_dir, split="unlabeled", transform=None)
+
+    # ------------------------------------------------------------------
+    # Test split (tensors via base_transform)
+    # ------------------------------------------------------------------
+    test_dataset: Dataset[Any]
+    if smoke_test and not _files_present(data_dir, ["test"]):
+        test_dataset = _SyntheticDataset(
+            n_samples=max_unlabelled, input_size=input_size, transform=transform
+        )
+    else:
+        test_dataset = _STL10Split(root=data_dir, split="test", transform=transform)
+
+    # Combine full unlabelled pool with leftover train images (both PIL)
+    unlabelled_dataset: Dataset[Any] = torch.utils.data.ConcatDataset(  # type: ignore[type-arg]
+        [unlabelled_full, extra_unlabelled_raw]
     )
 
     if smoke_test:
-        labelled_subset = Subset(
-            labelled_subset, list(range(min(max_labelled, len(labelled_subset))))
+        labelled_subset_transformed = Subset(
+            labelled_subset_transformed,
+            list(range(min(max_labelled, len(labelled_subset_transformed)))),
         )
         unlabelled_dataset = Subset(
-            unlabelled_dataset, list(range(min(max_unlabelled, len(unlabelled_dataset))))
+            unlabelled_dataset,
+            list(range(min(max_unlabelled, len(unlabelled_dataset)))),
         )  # type: ignore[arg-type]
         logger.info(
-            f"Smoke test: {len(labelled_subset)} labelled, {len(unlabelled_dataset)} unlabelled"
-        )  # type: ignore[arg-type]
+            f"Smoke test: {len(labelled_subset_transformed)} labelled, "
+            f"{len(unlabelled_dataset)} unlabelled"  # type: ignore[arg-type]
+        )
 
     logger.info(
-        f"Dataset splits — labelled: {len(labelled_subset)}, "  # type: ignore[arg-type]
+        f"Dataset splits — labelled: {len(labelled_subset_transformed)}, "
         f"unlabelled: {len(unlabelled_dataset)}, test: {len(test_dataset)}"  # type: ignore[arg-type]
     )
 
+    n_labelled = len(labelled_subset_transformed)
+    labelled_bs = min(64, n_labelled)
     labelled_loader = DataLoader(
-        labelled_subset,
-        batch_size=64,
+        labelled_subset_transformed,
+        batch_size=labelled_bs,
         shuffle=True,
         num_workers=num_workers,
         pin_memory=True,
-        drop_last=True,
+        drop_last=n_labelled >= 64,
     )
     unlabelled_loader = DataLoader(
         unlabelled_dataset,  # type: ignore[arg-type]
@@ -189,17 +318,23 @@ def get_unlabelled_loader(
     smoke_test: bool = False,
     max_unlabelled: int = 1000,
 ) -> DataLoader:  # type: ignore[type-arg]
-    """Return a DataLoader over the full STL-10 unlabeled split for SimCLR."""
-    transform = base_transform(input_size)
-    dataset = datasets.STL10(root=data_dir, split="unlabeled", transform=transform, download=False)
+    """Return a DataLoader over the STL-10 unlabeled split for SimCLR.
+
+    Returns raw PIL images (no transform) because the dataset is immediately
+    wrapped by ``SimCLRDataset`` which applies ``SimCLRAugmentation``
+    (including ``ToTensor``).  In smoke-test mode synthetic PIL images are
+    used so that no download is required.
+    """
     if smoke_test:
-        dataset = Subset(dataset, list(range(min(max_unlabelled, len(dataset)))))  # type: ignore[assignment]
+        dataset: Dataset[Any] = _SyntheticDataset(n_samples=max_unlabelled, input_size=input_size)
+    else:
+        dataset = _STL10Split(root=data_dir, split="unlabeled", transform=None)
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=num_workers,
-        pin_memory=True,
+        num_workers=0 if smoke_test else num_workers,
+        pin_memory=not smoke_test,
         drop_last=True,
     )
 

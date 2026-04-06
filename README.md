@@ -127,10 +127,14 @@ The archive is streamed from the network — the 2.6 GB tar.gz is never written 
 make sync         # uv sync --dev
 make test         # pytest with coverage (81%, 58 tests)
 make lint         # ruff format → ruff check --fix → ty check
-make smoke        # 2-epoch training on tiny synthetic subset
+make smoke-data   # download train split only (~120 MB)
+make smoke        # 2-epoch end-to-end run; uses synthetic data for missing splits
+make clean        # remove data/stl10_binary/, checkpoints, plots, mlruns
 ```
 
 CI runs `make sync && make lint && make test` on every push via GitHub Actions.
+
+`make smoke` works after `make smoke-data` alone — the unlabeled and test splits are replaced with synthetic PIL images so no 2.5 GB download is required on Codespaces.
 
 ---
 

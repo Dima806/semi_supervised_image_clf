@@ -173,10 +173,18 @@ def get_stl10_splits(
     config, labels_per_class, seed, input_size=64,
     smoke_test=False, max_labelled=50, max_unlabelled=1000,
 ) -> tuple[DataLoader, DataLoader, DataLoader]
-# Returns: labelled_loader, unlabelled_loader, test_loader
+# labelled_loader  → normalised tensors (base_transform applied)
+# unlabelled_loader → raw PIL images   (augmentation wrappers call ToTensor themselves)
+# test_loader      → normalised tensors
 
-def get_unlabelled_loader(...) -> DataLoader   # for SimCLR pretraining (uses split="unlabeled")
+def get_unlabelled_loader(...) -> DataLoader   # raw PIL images for SimCLR
 ```
+
+**Data loading design rule**: datasets fed into `SimCLRDataset` or `FixMatchUnlabelledDataset` must be raw PIL images — those augmentation classes include `ToTensor()` internally. Only the labelled and test loaders apply `base_transform` (tensor output).
+
+`_STL10Split` is used instead of `torchvision.datasets.STL10` because torchvision's `_check_integrity` requires **all five** binary files to be present even when only one split is opened — incompatible with the tiered download approach. `_STL10Split` checks only the files it actually reads.
+
+In smoke-test mode, missing splits (`unlabeled`, `test`) are replaced by `_SyntheticDataset` (returns PIL images), so `make smoke` works after `make smoke-data` (train only).
 
 ### `model.py`
 ```python
@@ -345,6 +353,6 @@ Full training on Kaggle T4: supervised baseline ~20 min; SimCLR + FixMatch sweep
 |---|---|
 | SimCLR too slow on 2 CPUs | Use `make smoke` (2 epochs, 1k images) |
 | FixMatch unstable with 4 labels/class | EMA model for pseudo-labels; supervised warmup |
-| STL-10 download fills Codespaces disk | Streaming download (tar.gz never on disk); `make smoke-data` writes ~120 MB; unlabeled split on Kaggle only |
+| STL-10 download fills Codespaces disk | Streaming download (tar.gz never on disk); `make smoke-data` writes ~120 MB; `make smoke` uses synthetic data for missing splits — no unlabeled download needed |
 | Kaggle session timeout (9h) | Two separate notebooks; checkpoints saved to Kaggle output |
 | Reproducibility across seeds | Fix seed in config; report mean over 3 seeds |
